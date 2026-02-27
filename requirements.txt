@@ -1,2 +1,8 @@
-streamlit
-plotly
+```bash venv setup```
+python -m venv venv
+source venv/Scripts/activate
+pip install streamlit plotly
+streamlit run MCLOS_Beta.py
+```
+
+note - sometimes python3 -m may be required
