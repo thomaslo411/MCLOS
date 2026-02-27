@@ -33,6 +33,7 @@ class LoadingStrategy(Enum):
 class PanelType(Enum):
     WALL = "Wall Panel"
     FLOOR = "Floor Panel (Half-Hex)"
+    ROOF = "Roof Panel"
 
 
 class TrailerPreset(Enum):
@@ -139,6 +140,11 @@ WALL_PANEL_DEFAULT = PanelSpec(
 FLOOR_PANEL_DEFAULT = PanelSpec(
     panel_type=PanelType.FLOOR, length=224.0, height=111.87, thickness=6.5,
     weight=585.15, short_edge=112.0
+)
+
+ROOF_PANEL_DEFAULT = PanelSpec(
+    panel_type=PanelType.ROOF, length=225.97, height=98.95, thickness=50.0,
+    weight=500.0, short_edge=112.0
 )
 
 
@@ -606,8 +612,9 @@ def apply_strategy_slot_order(strategy, floor_slots, placed, trailer, panel_size
 
 # ─── Panel List Builders ─────────────────────────────────────────────────────
 
-def build_panel_list_from_pods(num_pods, wall_spec, floor_spec):
+def build_panel_list_from_pods(num_pods, wall_spec, floor_spec, roof_spec, roofs_per_pod=2):
     panels = []
+    # Floors
     for pod in range(num_pods):
         for half in range(2):
             panels.append({
@@ -615,6 +622,17 @@ def build_panel_list_from_pods(num_pods, wall_spec, floor_spec):
                 "label": f"Pod{pod + 1}_Floor_{half + 1}",
                 "panel_type": PanelType.FLOOR.value,
             })
+
+    # Roofs
+    for pod in range(num_pods):
+        for roof in range(roofs_per_pod):
+            panels.append({
+                "spec": roof_spec,
+                "label": f"Pod{pod + 1}_Roof_{roof + 1}",
+                "panel_type": PanelType.ROOF.value,
+            })
+
+    # Walls
     for pod in range(num_pods):
         for wall in range(6):
             panels.append({
@@ -625,13 +643,19 @@ def build_panel_list_from_pods(num_pods, wall_spec, floor_spec):
     return panels
 
 
-def build_panel_list_manual(num_walls, num_floors, wall_spec, floor_spec):
+def build_panel_list_manual(num_walls, num_floors, num_roofs, wall_spec, floor_spec, roof_spec):
     panels = []
     for i in range(num_floors):
         panels.append({
             "spec": floor_spec,
             "label": f"Floor_{i + 1}",
             "panel_type": PanelType.FLOOR.value,
+        })
+    for i in range(num_roofs):
+        panels.append({
+            "spec": roof_spec,
+            "label": f"Roof_{i + 1}",
+            "panel_type": PanelType.ROOF.value,
         })
     for i in range(num_walls):
         panels.append({
@@ -866,6 +890,7 @@ def pack_panels_v14(panel_list, trailer_L, trailer_W, trailer_H,
     # ── Step 5: Summary metrics ──
     wall_count = sum(1 for p in placed if p["panel_type"] == PanelType.WALL.value)
     floor_count = sum(1 for p in placed if p["panel_type"] == PanelType.FLOOR.value)
+    roof_count = sum(1 for p in placed if p["panel_type"] == PanelType.ROOF.value)
     cg = compute_cg(placed)
     weight_dist = compute_weight_distribution(placed, trailer_L)
 
@@ -920,6 +945,7 @@ def pack_panels_v14(panel_list, trailer_L, trailer_W, trailer_H,
             "placed_panels": len(placed),
             "placed_walls": wall_count,
             "placed_floors": floor_count,
+            "placed_roofs": roof_count,
             "rejected_panels": len(rejected),
             "grid_step_in": float(step),
             "seed": int(seed),
@@ -1100,7 +1126,8 @@ def visualize(out, stress_config, color_by_stress, show_stress_markers, show_axl
 
     wall_pal = ["#3498db", "#2ecc71", "#9b59b6", "#1abc9c", "#95a5a6"]
     floor_pal = ["#e67e22", "#e74c3c", "#f1c40f", "#d35400"]
-    wi, fi = 0, 0
+    roof_pal = ["#ff66cc", "#8e44ad", "#16a085", "#c0392b"]
+    wi, fi, ri = 0, 0, 0
     tc = {}
 
     # Identify worst panel index for highlighting
@@ -1115,6 +1142,9 @@ def visualize(out, stress_config, color_by_stress, show_stress_markers, show_axl
             if pt == PanelType.FLOOR.value:
                 tc[key] = floor_pal[fi % len(floor_pal)]
                 fi += 1
+            elif pt == PanelType.ROOF.value:
+                tc[key] = roof_pal[ri % len(roof_pal)]
+                ri += 1
             else:
                 tc[key] = wall_pal[wi % len(wall_pal)]
                 wi += 1
@@ -1139,7 +1169,7 @@ def visualize(out, stress_config, color_by_stress, show_stress_markers, show_axl
 
         if p.get("is_trapezoid", False):
             am = tuple(p.get("axis_map", ["L", "H", "T"]))
-            verts = make_half_hex_vertices(x, y, z, dx, dy, dz, am, floor_spec.short_edge, floor_spec.length)
+            verts = make_half_hex_vertices(x, y, z, dx, dy, dz, am, p.get("short_edge", 0.0), p.get("spec_length", dx))
             add_half_hex_solid(fig, verts, c, opacity=0.45)
             add_half_hex_wire(fig, verts, c, "", opacity=wire_opacity, width=wire_width)
         else:
@@ -1325,7 +1355,7 @@ def visualize(out, stress_config, color_by_stress, show_stress_markers, show_axl
         for key, c in tc.items():
             count = sum(1 for p in out["placements"] if f"{p['panel_type']}|{p['orientation']}" == key)
             pt, o = key.split("|", 1)
-            short = "Floor" if "Floor" in pt else "Wall"
+            short = "Floor" if "Floor" in pt else ("Roof" if "Roof" in pt else "Wall")
             lbl = f"{short} - {o} ({count})"
             if lbl not in added:
                 fig.add_trace(go.Scatter3d(x=[None], y=[None], z=[None], mode="lines",
@@ -1909,27 +1939,36 @@ st.subheader("Panel Configuration")
 input_mode = st.radio("Input method", ["By Pod Count (quick)", "Manual Panel Count"], horizontal=True)
 
 if input_mode == "By Pod Count (quick)":
-    cp1, cp2 = st.columns([1, 2])
+    cp1, cp2, cp3 = st.columns([1, 1, 2])
     with cp1:
         num_pods = st.number_input("Pods", min_value=1, max_value=6, value=3, step=1,
-                                   help="6 walls + 2 floors per pod")
+                                   help="Default: 6 walls + 2 floors + roof panels per pod")
     with cp2:
+        roofs_per_pod = st.number_input("Roofs / Pod", min_value=0, value=2, step=1, key="rpp")
+    with cp3:
         tw = num_pods * 6
         tf = num_pods * 2
-        st.markdown(f"**{num_pods} Pod{'s' if num_pods > 1 else ''}** = **{tw + tf} panels** ({tw}W + {tf}F)")
+        trf = num_pods * roofs_per_pod
+        total_panels = tw + tf + trf
+        st.markdown(
+            f"**{num_pods} Pod{'s' if num_pods > 1 else ''}** = "
+            f"**{total_panels} panels** ({tw}W + {tf}F + {trf}R)"
+        )
     use_pods = True
 else:
-    mc1, mc2, mc3 = st.columns(3)
+    mc1, mc2, mc3, mc4 = st.columns(4)
     with mc1:
         manual_walls = st.number_input("Walls", min_value=0, value=18, step=1, key="mw")
     with mc2:
         manual_floors = st.number_input("Floors", min_value=0, value=6, step=1, key="mf")
     with mc3:
-        st.metric("Total", manual_walls + manual_floors)
+        manual_roofs = st.number_input("Roofs", min_value=0, value=6, step=1, key="mr")
+    with mc4:
+        st.metric("Total", manual_walls + manual_floors + manual_roofs)
     use_pods = False
 
 with st.expander("Panel Dimensions (edit if needed)"):
-    pc1, pc2 = st.columns(2)
+    pc1, pc2, pc3 = st.columns(3)
     with pc1:
         st.markdown("**Wall Panel**")
         wL = st.number_input("Length (in)", value=WALL_PANEL_DEFAULT.length, min_value=1.0, key="wl")
@@ -1943,9 +1982,17 @@ with st.expander("Panel Dimensions (edit if needed)"):
         fT = st.number_input("Thickness (in)", value=FLOOR_PANEL_DEFAULT.thickness, min_value=0.1, key="ft")
         fW = st.number_input("Weight (lb)", value=FLOOR_PANEL_DEFAULT.weight, min_value=0.1, key="fw")
         fS = st.number_input("Short Edge (in)", value=FLOOR_PANEL_DEFAULT.short_edge, min_value=1.0, key="fs")
+    with pc3:
+        st.markdown("**Roof Panel (Trapezoid)**")
+        rA = st.number_input("A - Top Edge (in)", value=ROOF_PANEL_DEFAULT.short_edge, min_value=1.0, key="ra")
+        rB = st.number_input("B - Base Edge (in)", value=ROOF_PANEL_DEFAULT.length, min_value=1.0, key="rb")
+        rC = st.number_input("C - Height (in)", value=ROOF_PANEL_DEFAULT.height, min_value=1.0, key="rc")
+        rT = st.number_input("Thickness (in)", value=ROOF_PANEL_DEFAULT.thickness, min_value=0.1, key="rt")
+        rW = st.number_input("Weight (lb)", value=ROOF_PANEL_DEFAULT.weight, min_value=0.1, key="rw")
 
 wall_spec = PanelSpec(panel_type=PanelType.WALL, length=wL, height=wH, thickness=wT, weight=wW)
 floor_spec = PanelSpec(panel_type=PanelType.FLOOR, length=fL, height=fH, thickness=fT, weight=fW, short_edge=fS)
+roof_spec = PanelSpec(panel_type=PanelType.ROOF, length=rB, height=rC, thickness=rT, weight=rW, short_edge=rA)
 
 # ─── Run ────────────────────────────────────────────────────────────────────
 st.markdown("---")
@@ -1958,9 +2005,9 @@ with rc2:
 
 if run_btn:
     if use_pods:
-        panel_list = build_panel_list_from_pods(num_pods, wall_spec, floor_spec)
+        panel_list = build_panel_list_from_pods(num_pods, wall_spec, floor_spec, roof_spec, roofs_per_pod=roofs_per_pod)
     else:
-        panel_list = build_panel_list_manual(manual_walls, manual_floors, wall_spec, floor_spec)
+        panel_list = build_panel_list_manual(manual_walls, manual_floors, manual_roofs, wall_spec, floor_spec, roof_spec)
 
     if not panel_list:
         st.error("No panels to optimize.")
